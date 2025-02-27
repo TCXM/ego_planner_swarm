@@ -182,8 +182,15 @@ namespace ego_planner
         double sample_length = 0;
         double cps_dist = pp_.ctrl_pt_dist * 1.5; // cps_dist will be divided by 1.5 in the next
         size_t id = 0;
+        int iter = 0;
+        const int max_iter = 20;
         do
         {
+          if (++iter > max_iter) {
+            ROS_ERROR("Too many iterations, return!");
+            continous_failures_count_++;
+            return false;
+          }
           cps_dist /= 1.5;
           point_set.clear();
           sample_length = 0;

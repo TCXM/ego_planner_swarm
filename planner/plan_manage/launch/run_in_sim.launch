@@ -16,7 +16,7 @@
   <arg name="odom_topic"/>
 
   <!-- number of moving objects -->
-  <arg name="obj_num" value="10" />
+  <arg name="obj_num" value="0" />
 
   <!-- main algorithm params -->
   <include file="$(find ego_planner)/launch/advanced_param.xml">
