@@ -5,6 +5,10 @@
 #include "std_msgs/Empty.h"
 #include "visualization_msgs/Marker.h"
 #include <ros/ros.h>
+#include <sstream>
+#include <vector>
+#include <string>
+#include <std_msgs/String.h>
 
 ros::Publisher pos_cmd_pub;
 
@@ -23,6 +27,57 @@ int traj_id_;
 // yaw control
 double last_yaw_, last_yaw_dot_;
 double time_forward_;
+
+// recover
+bool recovering = false;
+double recover_start_time = 0.0;
+const double recover_duration = 1.0; // 假设1秒完成1米运动
+Eigen::Vector3d recover_start_pos, recover_end_pos;
+Eigen::Vector3d last_pos = Eigen::Vector3d::Zero();
+
+void recoverCallback(const std_msgs::String::ConstPtr &msg)
+{
+    std::string data = msg->data;
+    // 预期格式: "move_x_1.0", "move_y_-2.0", "move_z_0.5"
+    std::istringstream iss(data);
+    std::vector<std::string> tokens;
+    std::string token;
+    while (std::getline(iss, token, '_'))
+    {
+        tokens.push_back(token);
+    }
+    if (tokens.size() != 3 || tokens[0] != "move")
+    {
+        ROS_WARN("[Traj server]: Invalid recover command: %s", data.c_str());
+        return;
+    }
+    
+    char axis = tokens[1].c_str()[0];
+    double displacement = atof(tokens[2].c_str());
+    
+    Eigen::Vector3d recover_offset(0, 0, 0);
+    switch (axis)
+    {
+        case 'x':
+            recover_offset(0) = displacement;
+            break;
+        case 'y':
+            recover_offset(1) = displacement;
+            break;
+        case 'z':
+            recover_offset(2) = displacement;
+            break;
+        default:
+            ROS_WARN("[Traj server]: Invalid axis in recover command: %s", data.c_str());
+            return;
+    }
+    
+    recover_start_pos = last_pos; // 使用上一次定时回调保存的位置
+    recover_end_pos = recover_start_pos + recover_offset;
+    recover_start_time = ros::Time::now().toSec();
+    recovering = true;
+    ROS_WARN("[Traj server]: Recover command '%s' triggered.", data.c_str());
+}
 
 void bsplineCallback(traj_utils::BsplineConstPtr msg)
 {
@@ -162,85 +217,123 @@ std::pair<double, double> calculate_yaw(double t_cur, Eigen::Vector3d &pos, ros:
 
 void cmdCallback(const ros::TimerEvent &e)
 {
-  /* no publishing before receive traj_ */
-  if (!receive_traj_)
-    return;
+    ros::Time time_now = ros::Time::now();
+    static ros::Time time_last = time_now;
+    
+    // 恢复模式下优先发布恢复指令
+    if (recovering)
+    {
+        double t_recover = time_now.toSec() - recover_start_time;
+        double ratio = (t_recover < recover_duration) ? (t_recover / recover_duration) : 1.0;
+        Eigen::Vector3d pos = recover_start_pos + ratio * (recover_end_pos - recover_start_pos);
+        Eigen::Vector3d vel = (recover_end_pos - recover_start_pos) / recover_duration;
+        
+        cmd.header.stamp = time_now;
+        cmd.header.frame_id = "world";
+        cmd.position.x = pos(0);
+        cmd.position.y = pos(1);
+        cmd.position.z = pos(2);
 
-  ros::Time time_now = ros::Time::now();
-  double t_cur = (time_now - start_time_).toSec();
+        cmd.velocity.x = vel(0);
+        cmd.velocity.y = vel(1);
+        cmd.velocity.z = vel(2);
 
-  Eigen::Vector3d pos(Eigen::Vector3d::Zero()), vel(Eigen::Vector3d::Zero()), acc(Eigen::Vector3d::Zero()), pos_f;
-  std::pair<double, double> yaw_yawdot(0, 0);
+        cmd.acceleration.x = 0;
+        cmd.acceleration.y = 0;
+        cmd.acceleration.z = 0;
 
-  static ros::Time time_last = ros::Time::now();
-  if (t_cur < traj_duration_ && t_cur >= 0.0)
-  {
-    pos = traj_[0].evaluateDeBoorT(t_cur);
-    vel = traj_[1].evaluateDeBoorT(t_cur);
-    acc = traj_[2].evaluateDeBoorT(t_cur);
+        cmd.yaw = last_yaw_;
+        cmd.yaw_dot = 0;
+        
+        pos_cmd_pub.publish(cmd);
+        last_pos = pos;
+        
+        if (t_recover >= recover_duration)
+            recovering = false;
+        
+        time_last = time_now;
+        return;
+    }
+    
+    /* no publishing before receive traj_ */
+    if (!receive_traj_)
+        return;
+    
+    double t_cur = (time_now - start_time_).toSec();
 
-    /*** calculate yaw ***/
-    yaw_yawdot = calculate_yaw(t_cur, pos, time_now, time_last);
-    /*** calculate yaw ***/
+    Eigen::Vector3d pos(Eigen::Vector3d::Zero()), vel(Eigen::Vector3d::Zero()), acc(Eigen::Vector3d::Zero()), pos_f;
+    std::pair<double, double> yaw_yawdot(0, 0);
 
-    double tf = min(traj_duration_, t_cur + 2.0);
-    pos_f = traj_[0].evaluateDeBoorT(tf);
-  }
-  else if (t_cur >= traj_duration_)
-  {
-    /* hover when finish traj_ */
-    pos = traj_[0].evaluateDeBoorT(traj_duration_);
-    vel.setZero();
-    acc.setZero();
+    if (t_cur < traj_duration_ && t_cur >= 0.0)
+    {
+        pos = traj_[0].evaluateDeBoorT(t_cur);
+        vel = traj_[1].evaluateDeBoorT(t_cur);
+        acc = traj_[2].evaluateDeBoorT(t_cur);
 
-    yaw_yawdot.first = last_yaw_;
-    yaw_yawdot.second = 0;
+        /*** calculate yaw ***/
+        yaw_yawdot = calculate_yaw(t_cur, pos, time_now, time_last);
+        /*** calculate yaw ***/
 
-    pos_f = pos;
-  }
-  else
-  {
-    cout << "[Traj server]: invalid time." << endl;
-  }
-  time_last = time_now;
+        double tf = min(traj_duration_, t_cur + 2.0);
+        pos_f = traj_[0].evaluateDeBoorT(tf);
+    }
+    else if (t_cur >= traj_duration_)
+    {
+        /* hover when finish traj_ */
+        pos = traj_[0].evaluateDeBoorT(traj_duration_);
+        vel.setZero();
+        acc.setZero();
 
-  cmd.header.stamp = time_now;
-  cmd.header.frame_id = "world";
-  cmd.trajectory_flag = quadrotor_msgs::PositionCommand::TRAJECTORY_STATUS_READY;
-  cmd.trajectory_id = traj_id_;
+        yaw_yawdot.first = last_yaw_;
+        yaw_yawdot.second = 0;
 
-  cmd.position.x = pos(0);
-  cmd.position.y = pos(1);
-  cmd.position.z = pos(2);
+        pos_f = pos;
+    }
+    else
+    {
+        cout << "[Traj server]: invalid time." << endl;
+    }
+    time_last = time_now;
+    
+    cmd.header.stamp = time_now;
+    cmd.header.frame_id = "world";
+    cmd.trajectory_flag = quadrotor_msgs::PositionCommand::TRAJECTORY_STATUS_READY;
+    cmd.trajectory_id = traj_id_;
 
-  cmd.velocity.x = vel(0);
-  cmd.velocity.y = vel(1);
-  cmd.velocity.z = vel(2);
+    cmd.position.x = pos(0);
+    cmd.position.y = pos(1);
+    cmd.position.z = pos(2);
 
-  cmd.acceleration.x = acc(0);
-  cmd.acceleration.y = acc(1);
-  cmd.acceleration.z = acc(2);
+    cmd.velocity.x = vel(0);
+    cmd.velocity.y = vel(1);
+    cmd.velocity.z = vel(2);
 
-  cmd.yaw = yaw_yawdot.first;
-  cmd.yaw_dot = yaw_yawdot.second;
+    cmd.acceleration.x = acc(0);
+    cmd.acceleration.y = acc(1);
+    cmd.acceleration.z = acc(2);
 
-  last_yaw_ = cmd.yaw;
+    cmd.yaw = yaw_yawdot.first;
+    cmd.yaw_dot = yaw_yawdot.second;
 
-  pos_cmd_pub.publish(cmd);
+    last_yaw_ = cmd.yaw;
+
+    pos_cmd_pub.publish(cmd);
+    last_pos = pos; // 更新 last_pos 为最新位置
 }
 
 int main(int argc, char **argv)
 {
   ros::init(argc, argv, "traj_server");
-  // ros::NodeHandle node;
   ros::NodeHandle nh("~");
 
   ros::Subscriber bspline_sub = nh.subscribe("planning/bspline", 10, bsplineCallback);
 
+  ros::Subscriber recover_sub = nh.subscribe("recover", 10, recoverCallback);
+
   pos_cmd_pub = nh.advertise<quadrotor_msgs::PositionCommand>("/position_cmd", 50);
 
   ros::Timer cmd_timer = nh.createTimer(ros::Duration(0.01), cmdCallback);
-
+  
   /* control parameter */
   cmd.kx[0] = pos_gain[0];
   cmd.kx[1] = pos_gain[1];
