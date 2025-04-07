@@ -6,10 +6,11 @@ This repository is based on the [Ego-Planner-Swarm](https://github.com/ZJU-FAST-
 
 ### Step 1: Add ego_planner_swarm to your workspace
 
-Download this repo and add to your own workspace：
+Download this repo and add to your own workspace：```your_ws/src/ego_planner_swarm```
 
+Then Install dependency
 ```bash
-your_ws/src/ego_planner_swarm
+sudo apt install libarmadillo-dev
 ```
 
 ### Step 2: Creat a launch file
