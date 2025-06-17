@@ -133,7 +133,7 @@ void renderSensedPoints(const ros::TimerEvent& event) {
                       pt.y - _odom.pose.pose.position.y,
                       pt.z - _odom.pose.pose.position.z);
 
-      if (pt_vec.normalized().dot(yaw_vec) < 0.5) continue; 
+      // if (pt_vec.normalized().dot(yaw_vec) < 0.5) continue; 
 
       _local_map.points.push_back(pt);
     }
